@@ -7,12 +7,12 @@ local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/Ali-l
 local Logo = "rbxassetid://77434646025119"
 
 local Window = Library:Window({
-    Name = "StreetLife by Zero.gg",
+    Name = "StreetLife by Xeioa",
     Logo = Logo,
     ShowTabName = false
 })
 
-local Watermark = Library:Watermark("StreetLife by Zero.gg", Logo)
+local Watermark = Library:Watermark("StreetLife by Xeioa", Logo)
 local KeyList = Library:KeybindList()
 
 local CombatPage = Window:Page({
@@ -30,6 +30,11 @@ local FarmPage = Window:Page({
     Icon = "layout-dashboard"
 })
 
+local PlayerPage = Window:Page({
+    Name = "Player",
+    Icon = "user"
+})
+
 local CombatSection = CombatPage:Section({
     Name = "Silent Aim",
     Icon = "target",
@@ -40,6 +45,12 @@ local ShopSection = ShopPage:Section({
     Name = "Gun Shop",
     Icon = "shopping-bag",
     Side = 1
+})
+
+local AmmoSection = ShopPage:Section({
+    Name = "Ammo Shop",
+    Icon = "box",
+    Side = 2
 })
 
 local MopSection = FarmPage:Section({
@@ -72,12 +83,19 @@ local SettingSection = FarmPage:Section({
     Side = 2
 })
 
+local PlayerSection = PlayerPage:Section({
+    Name = "Player Options",
+    Icon = "user-check",
+    Side = 1
+})
+
 local PathfindingService = game:GetService("PathfindingService")
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -102,6 +120,8 @@ local FOVTracer = false
 local HighlightTarget = false
 local WallCheckEnabled = false
 
+local SpeedBoostEnabled = false
+
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1
 FOVCircle.NumSides = 64
@@ -115,18 +135,31 @@ TracerLine.Visible = false
 local CurrentHighlight = nil
 
 local GunPrices = {
-    ["Ruger"] = 800,
-    ["Glock"] = 500,
-    ["M4A1"] = 2500,
-    ["AK47"] = 3000,
-    ["Shotgun"] = 1500,
-    ["Deagle"] = 1200,
-    ["MP5"] = 2000,
-    ["Uzi"] = 1800,
-    ["Sniper"] = 5000
+    ["Vector"] = 7000,
+    ["AK-47"] = 6500,
+    ["HoneyBadger"] = 5500,
+    ["ARPistol"] = 5000,
+    ["GlockSwitch"] = 5400,
+    ["Glock19X"] = 5000,
+    ["AUG"] = 5000,
+    ["Draco"] = 5200,
+    ["Tec-9"] = 3500,
+    ["UMP"] = 4800,
+    ["Shotgun"] = 5000,
+    ["Mac"] = 3000,
+    ["Makarov"] = 1000,
+    ["Glock17"] = 1200
 }
 
-local SelectedGun = "Ruger"
+local AmmoPrices = {
+    ["Shotgun Ammo"] = 100,
+    ["SMG Ammo"] = 100,
+    ["Rifle Ammo"] = 100,
+    ["Pistol Ammo"] = 50
+}
+
+local SelectedGun = "Vector"
+local SelectedAmmo = "Pistol Ammo"
 
 local Success, Projectile = pcall(function()
     return require(ReplicatedStorage.Modules.GunFramework.Modules.Projectile)
@@ -210,6 +243,17 @@ local function updateHighlight(target)
         CurrentHighlight.Parent = target.Character
     end
 end
+
+RunService.Heartbeat:Connect(function(deltaTime)
+    if SpeedBoostEnabled and LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        local rootPart = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        
+        if humanoid and rootPart and humanoid.MoveDirection.Magnitude > 0 then
+            rootPart.CFrame = rootPart.CFrame + (humanoid.MoveDirection * humanoid.WalkSpeed * deltaTime)
+        end
+    end
+end)
 
 RunService.RenderStepped:Connect(function()
     local fovPos = GetFOVPosition()
@@ -324,11 +368,32 @@ CombatSection:Checkbox({
     end
 })
 
+local CombatButtons = CombatSection:Button()
+CombatButtons:Add("Inf Ammo", function()
+    local function InfAmmo(Tool)
+        if Tool:IsA("Tool") and Tool:GetAttribute("Ammo_Client") ~= nil then
+            local function Keep()
+                if Tool:GetAttribute("Ammo_Client") < 999 then
+                    Tool:SetAttribute("Ammo_Client", 999)
+                end
+            end
+            Keep()
+            Tool:GetAttributeChangedSignal("Ammo_Client"):Connect(Keep)
+        end
+    end
+
+    for _, Tool in ipairs(CollectionService:GetTagged("Gun")) do
+        InfAmmo(Tool)
+    end
+
+    CollectionService:GetInstanceAddedSignal("Gun"):Connect(InfAmmo)
+end)
+
 ShopSection:Dropdown({
     Name = "Gun",
     Flag = "ShopGunSelection",
-    Default = "Ruger",
-    Items = {"Ruger", "Glock", "M4A1", "AK47", "Shotgun", "Deagle", "MP5", "Uzi", "Sniper"},
+    Default = "Vector",
+    Items = {"Vector", "AK-47", "HoneyBadger", "ARPistol", "GlockSwitch", "Glock19X", "AUG", "Draco", "Tec-9", "UMP", "Shotgun", "Mac", "Makarov", "Glock17"},
     Multi = false,
     Callback = function(Value)
         SelectedGun = Value
@@ -336,13 +401,42 @@ ShopSection:Dropdown({
 })
 
 local ShopButtons = ShopSection:Button()
-ShopButtons:Add("Buy", function()
+ShopButtons:Add("Buy Gun", function()
     local gunRemote = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("GunBuy")
     if gunRemote and SelectedGun then
         local price = GunPrices[SelectedGun] or 0
         gunRemote:FireServer(SelectedGun, price)
     end
 end)
+
+AmmoSection:Dropdown({
+    Name = "Ammo",
+    Flag = "ShopAmmoSelection",
+    Default = "Pistol Ammo",
+    Items = {"Shotgun Ammo", "SMG Ammo", "Rifle Ammo", "Pistol Ammo"},
+    Multi = false,
+    Callback = function(Value)
+        SelectedAmmo = Value
+    end
+})
+
+local AmmoButtons = AmmoSection:Button()
+AmmoButtons:Add("Buy Ammo", function()
+    local gunRemote = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("GunBuy")
+    if gunRemote and SelectedAmmo then
+        local price = AmmoPrices[SelectedAmmo] or 0
+        gunRemote:FireServer(SelectedAmmo, price)
+    end
+end)
+
+PlayerSection:Toggle({
+    Name = "SpeedBoost",
+    Flag = "SpeedBoostToggle",
+    Default = false,
+    Callback = function(Value)
+        SpeedBoostEnabled = Value
+    end
+})
 
 SettingSection:Slider({
     Name = "Tween Speed",
@@ -532,7 +626,6 @@ task.spawn(function()
                     and workspace.Map:FindFirstChild("Jobs")
                     and workspace.Map.Jobs:FindFirstChild("BoxJob")
                     and workspace.Map.Jobs.BoxJob:FindFirstChild("Take")
-                    and workspace.Map.Jobs.BoxJob.Take:FindFirstChild("Take")
                     and workspace.Map.Jobs.BoxJob.Take.Take:FindFirstChild("Interact")
 
                 if takePrompt then
@@ -550,7 +643,6 @@ task.spawn(function()
                         and workspace.Map:FindFirstChild("Jobs")
                         and workspace.Map.Jobs:FindFirstChild("BoxJob")
                         and workspace.Map.Jobs.BoxJob:FindFirstChild("Deliver")
-                        and workspace.Map.Jobs.BoxJob.Deliver:FindFirstChild("Deliver")
                         and workspace.Map.Jobs.BoxJob.Deliver.Deliver:FindFirstChild("Interact")
 
                     if deliverPrompt then
