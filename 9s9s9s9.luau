@@ -1450,9 +1450,10 @@ do
 		Jitter = true,
 		Height = 22,
 		Radius = 24,
-		FirePad = 1,
+		FirePad = 0,
 		SkipImmune = true,
-		MaxShotsPerStep = 2,
+		MaxShotsPerStep = 3,
+		GapScale = 0.92,
 	}
 
 	local stickyPlayer = nil
@@ -1463,6 +1464,7 @@ do
 	local chain = { 1, 2, 3 }
 	local pending = nil
 	local rng = Random.new()
+	local infoOriginals = setmetatable({}, { __mode = "k" })
 
 	local function isItemEmpty(item)
 		local ok, ammo, reserve, infAmmo, infReserve = pcall(function()
@@ -1878,15 +1880,17 @@ do
 		local pad = RageBot.FirePad / 1000
 		local ok, gap = pcall(function()
 			local info = item.Info
-			local base = info.ShootCooldown or info.AttackCooldown
-			if not base then
+			local saved = infoOriginals[info] or {}
+			local base = saved.ShootCooldown or info.ShootCooldown or info.AttackCooldown
+			if not base or base <= 0 then
 				return RageBot.FireRate
 			end
 			local burst = info.BurstCount
-			if burst and burst > 1 and info.BurstCooldown and burstShots % burst ~= 0 then
-				return info.BurstCooldown + pad
+			local burstCooldown = saved.BurstCooldown or info.BurstCooldown
+			if burst and burst > 1 and burstCooldown and burstShots % burst ~= 0 then
+				return burstCooldown * RageBot.GapScale + pad
 			end
-			return base + pad
+			return base * RageBot.GapScale + pad
 		end)
 		if ok and gap then
 			return gap
@@ -1907,7 +1911,6 @@ do
 	end
 
 	runS:BindToRenderStep("__ragerestore", 101, restore)
-	runS.PreSimulation:Connect(restore)
 
 	local function step()
 		if not RageBot.Enabled then
@@ -1991,12 +1994,15 @@ do
 		end
 	end
 
-	runS.Heartbeat:Connect(function()
+	local function safeStep()
 		local ok = pcall(step)
 		if not ok then
 			restore()
 		end
-	end)
+	end
+
+	runS.PreSimulation:Connect(safeStep)
+	runS.Heartbeat:Connect(safeStep)
 
 	local RageBotTab = Rage:AddSubTab("Ragebot", "skull")
 	local RageBotSection = RageBotTab:AddSection("Ragebot", "Left", "skull", "ragebotmain")
@@ -2118,6 +2124,160 @@ do
 			GunMods.FireRateMultiplier = Value
 		end,
 	})
+
+	local InfoMods = {
+		NoRecoil = false,
+		NoSpread = false,
+		InstantProjectile = false,
+		NoCooldown = false,
+		FastReload = false,
+		FastEquip = false,
+		ExtendedRange = false,
+	}
+
+	local fixedRules = {
+		{ mod = "NoRecoil", keys = { "ShootRecoil" }, value = 0 },
+		{ mod = "NoSpread", keys = { "ShootSpread" }, value = 0 },
+		{ mod = "InstantProjectile", keys = { "ProjectileSpeed" }, value = 99999999 },
+		{ mod = "NoCooldown", keys = { "ShootCooldown", "QuickShotCooldown", "BurstCooldown" }, value = 0 },
+	}
+
+	local function matchReload(key)
+		return string.find(key, "Reload", 1, true) and (string.find(key, "Time", 1, true) or string.find(key, "Cooldown", 1, true)) and not string.find(key, "Ammo", 1, true)
+	end
+
+	local function matchEquip(key)
+		return string.find(key, "Equip", 1, true) and (string.find(key, "Time", 1, true) or string.find(key, "Cooldown", 1, true) or string.find(key, "Duration", 1, true))
+	end
+
+	local function matchRange(key)
+		return string.find(key, "Range", 1, true) or string.find(key, "MaxDistance", 1, true)
+	end
+
+	local scaleRules = {
+		{ mod = "FastReload", match = matchReload, scale = 0.25 },
+		{ mod = "FastEquip", match = matchEquip, scale = 0.1 },
+		{ mod = "ExtendedRange", match = matchRange, scale = 5 },
+	}
+
+	local function applyInfoMods(item)
+		local info = type(item) == "table" and item.Info
+		if type(info) ~= "table" then
+			return
+		end
+		local saved = infoOriginals[info]
+		if not saved then
+			saved = {}
+			infoOriginals[info] = saved
+		end
+		local function setField(key, enabled, value, scale)
+			local current = info[key]
+			if type(current) ~= "number" then
+				return
+			end
+			if saved[key] == nil then
+				saved[key] = current
+			end
+			if enabled then
+				info[key] = value or saved[key] * scale
+			else
+				info[key] = saved[key]
+			end
+		end
+		for _, rule in ipairs(fixedRules) do
+			for _, key in ipairs(rule.keys) do
+				setField(key, InfoMods[rule.mod], rule.value, nil)
+			end
+		end
+		local keys = {}
+		for key, value in pairs(info) do
+			if type(key) == "string" and type(value) == "number" then
+				table.insert(keys, key)
+			end
+		end
+		for _, rule in ipairs(scaleRules) do
+			for _, key in ipairs(keys) do
+				if rule.match(key) then
+					setField(key, InfoMods[rule.mod], nil, rule.scale)
+				end
+			end
+		end
+	end
+
+	local infoModule = nil
+	local inputOld = nil
+
+	local function anyInfoMod()
+		for _, enabled in pairs(InfoMods) do
+			if enabled then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function ensureInfoHook()
+		if inputOld then
+			return
+		end
+		local ok, mod = pcall(function()
+			return require(lplr.PlayerScripts.Modules.ClientReplicatedClasses.ClientFighter.ClientItem)
+		end)
+		if not ok or type(mod) ~= "table" or type(mod.Input) ~= "function" then
+			return
+		end
+		infoModule = mod
+		inputOld = hookfunction(mod.Input, function(self, ...)
+			applyInfoMods(self)
+			return inputOld(self, ...)
+		end)
+	end
+
+	local function removeInfoHook()
+		if not inputOld or not infoModule then
+			return
+		end
+		pcall(function()
+			hookfunction(infoModule.Input, inputOld)
+		end)
+		inputOld = nil
+		infoModule = nil
+	end
+
+	local function refreshInfoMods()
+		local localFighter = FighterController.LocalFighter
+		local items = localFighter and localFighter.Items
+		if items then
+			for _, item in pairs(items) do
+				applyInfoMods(item)
+			end
+		end
+		if anyInfoMod() then
+			ensureInfoHook()
+		else
+			removeInfoHook()
+		end
+	end
+
+	local function addInfoToggle(name, key, flag)
+		GunModsSection:AddToggle({
+			Name = name,
+			Default = InfoMods[key],
+			Flag = flag,
+			Callback = function(Value)
+				InfoMods[key] = Value
+				refreshInfoMods()
+			end,
+		})
+	end
+
+	addInfoToggle("Instant Projectile", "InstantProjectile", "GunModsInstantProjectile")
+	addInfoToggle("No Cooldown", "NoCooldown", "GunModsNoCooldown")
+	addInfoToggle("Fast Reload", "FastReload", "GunModsFastReload")
+	addInfoToggle("Fast Equip", "FastEquip", "GunModsFastEquip")
+	addInfoToggle("Extended Range", "ExtendedRange", "GunModsExtendedRange")
+	addInfoToggle("Info No Recoil", "NoRecoil", "GunModsInfoNoRecoil")
+	addInfoToggle("Info No Spread", "NoSpread", "GunModsInfoNoSpread")
 end
 
 do
