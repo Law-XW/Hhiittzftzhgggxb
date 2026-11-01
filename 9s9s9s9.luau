@@ -1450,10 +1450,10 @@ do
 		Jitter = true,
 		Height = 22,
 		Radius = 24,
-		FirePad = 0,
+		FirePad = 1,
 		SkipImmune = true,
-		MaxShotsPerStep = 3,
-		GapScale = 0.92,
+		MaxShotsPerStep = 2,
+		GapScale = 1,
 	}
 
 	local stickyPlayer = nil
@@ -1674,121 +1674,13 @@ do
 		return best
 	end
 
-	local rayParams = RaycastParams.new()
-	rayParams.FilterType = Enum.RaycastFilterType.Exclude
-	rayParams.IgnoreWater = true
-	local rayTime = 0
-	local lastDesync = nil
-	local cachedThreats = {}
-
-	local function refreshRayFilter()
-		local now = tick()
-		if now - rayTime < 0.25 then
-			return
-		end
-		rayTime = now
-		local ignore = {}
-		for _, player in plrs:GetPlayers() do
-			if player.Character then
-				table.insert(ignore, player.Character)
-			end
-		end
-		local camera = ws.CurrentCamera
-		if camera then
-			table.insert(ignore, camera)
-		end
-		local viewModels = ws:FindFirstChild("ViewModels")
-		if viewModels then
-			table.insert(ignore, viewModels)
-		end
-		rayParams.FilterDescendantsInstances = ignore
-	end
-
-	local function isBlocked(fromPos, toPos)
-		local result = ws:Raycast(fromPos, toPos - fromPos, rayParams)
-		if not result then
-			return false
-		end
-		local hit = result.Instance
-		return hit.CanCollide and hit.Transparency < 0.9
-	end
-
-	local function getThreats()
-		local list = {}
-		local now = tick()
-		if not FighterController.Objects then
-			return list
-		end
-		for _, fighterObj in FighterController.Objects do
-			local player = fighterObj.Player
-			if player and isEnemy(player) then
-				local pChar = player.Character
-				local pHead = pChar and pChar:FindFirstChild("Head")
-				local equipped = fighterObj.EquippedItem
-				if pHead and equipped then
-					local ok, cooldown = pcall(function()
-						return equipped._shoot_cooldown or equipped._attack_cooldown or 0
-					end)
-					local ready = not ok or (cooldown - now) < 0.25
-					table.insert(list, { pos = pHead.Position, ready = ready })
-				end
-			end
-		end
-		return list
-	end
-
-	local function refreshCache()
-		local now = tick()
-		if now - cacheTime < 0.03 then
-			return
-		end
-		cacheTime = now
-		cachedKnife = getKnifeRoots()
-		cachedEnemies = getEnemyRoots(nil)
-		cachedThreats = getThreats()
-	end
-
 	local function pickDesyncPosition(target)
-		local base = target.part.Position
-		if not RageBot.AntiHit then
-			return (target.root.CFrame * CFrame.new(0, 1, 2)).Position
+		local rootPos = target.root.Position
+		local jitter = Vector3.zero
+		if RageBot.Jitter then
+			jitter = Vector3.new(rng:NextNumber(-0.4, 0.4), rng:NextNumber(-0.3, 0.3), rng:NextNumber(-0.4, 0.4))
 		end
-		refreshRayFilter()
-		local readyThreats = {}
-		for _, threat in cachedThreats do
-			if threat.ready and #readyThreats < 3 then
-				table.insert(readyThreats, threat)
-			end
-		end
-		local attempts = #readyThreats > 0 and 12 or 6
-		local bestPos = nil
-		local bestScore = -math.huge
-		for _ = 1, attempts do
-			local angle = rng:NextNumber(0, math.pi * 2)
-			local radius = rng:NextNumber(4, RageBot.Radius)
-			local height = RageBot.Height + rng:NextNumber(0, 14)
-			local position = base + Vector3.new(math.cos(angle) * radius, height, math.sin(angle) * radius)
-			if minDistance(position, cachedKnife) >= knifeSafeRange then
-				local score = math.min(minDistance(position, cachedEnemies), 150) * 0.5
-				if lastDesync then
-					score = score + math.min((position - lastDesync).Magnitude, 40)
-				end
-				for _, threat in readyThreats do
-					if isBlocked(threat.pos, position) then
-						score = score + 40
-					end
-				end
-				if score > bestScore then
-					bestScore = score
-					bestPos = position
-				end
-			end
-		end
-		if not bestPos then
-			bestPos = base + Vector3.new(0, RageBot.Height + 24, 0)
-		end
-		lastDesync = bestPos
-		return bestPos
+		return rootPos + Vector3.new(0, -0.6, 0) + jitter
 	end
 
 	local burstShots = 0
@@ -1942,7 +1834,6 @@ do
 		end
 		stickyPlayer = target.player
 
-		refreshCache()
 		local desyncPos = pickDesyncPosition(target)
 		local desyncCF = CFrame.lookAt(desyncPos, target.part.Position)
 		pending = {
