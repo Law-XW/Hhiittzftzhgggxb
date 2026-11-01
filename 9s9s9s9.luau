@@ -1442,9 +1442,21 @@ do
 		Enabled = false,
 		ChangeOnReload = false,
 		FireRate = 0.0005,
+		TargetMode = "Closest",
+		HitPart = "Head",
+		MaxDistance = 500,
+		WallCheck = true,
+		AntiHit = true,
+		Jitter = true,
+		Height = 16,
+		Radius = 6,
+		FirePad = 4,
+		SkipImmune = true,
 	}
 
 	local chain = { 1, 2, 3 }
+	local pending = nil
+	local rng = Random.new()
 
 	local function isItemEmpty(item)
 		local ok, ammo, reserve, infAmmo, infReserve = pcall(function()
@@ -1539,36 +1551,69 @@ do
 		return isDuelEnemy(player)
 	end
 
-	local function getClosestTarget()
-		local char = lplr.Character
-		if not char then return nil, nil, nil end
-		local myRoot = char:FindFirstChild("HumanoidRootPart")
-		if not myRoot then return nil, nil, nil end
-		local closestPlayer = nil
-		local closestRoot = nil
-		local closestHead = nil
-		local closestDist = 500
+	local function isTargetImmune(player)
+		local ok, immune = pcall(function()
+			local fighter = FighterController:GetFighter(player)
+			local entity = fighter and fighter.Entity
+			return entity and entity:Get("IsInvincible")
+		end)
+		return ok and immune and true or false
+	end
+
+	local function getHitPart(pChar)
+		local part = pChar:FindFirstChild(RageBot.HitPart, true)
+		if part and part:IsA("BasePart") then
+			return part
+		end
+		local head = pChar:FindFirstChild("Head")
+		if head and head:IsA("BasePart") then
+			return head
+		end
+		return nil
+	end
+
+	local function collectTargets(myRoot)
+		local list = {}
+		local camera = ws.CurrentCamera
+		local viewport = camera and camera.ViewportSize / 2
 		for _, player in plrs:GetPlayers() do
 			if not isEnemy(player) then continue end
+			if deflecting[player] then continue end
+			if RageBot.SkipImmune and isTargetImmune(player) then continue end
 			local pChar = player.Character
 			if not pChar then continue end
 			local pRoot = pChar:FindFirstChild("HumanoidRootPart")
-			local pHead = pChar:FindFirstChild("Head")
 			local pHum = pChar:FindFirstChildWhichIsA("Humanoid")
-			if not (pRoot and pHead and pHum and pHum.Health > 0) then continue end
+			local part = getHitPart(pChar)
+			if not (pRoot and part and pHum and pHum.Health > 0) then continue end
 			local dist = (myRoot.Position - pRoot.Position).Magnitude
-			if dist < closestDist then
-				closestDist = dist
-				closestPlayer = player
-				closestRoot = pRoot
-				closestHead = pHead
+			if dist > RageBot.MaxDistance then continue end
+			local score = dist
+			if RageBot.TargetMode == "Lowest Health" then
+				score = pHum.Health * 1000 + dist
+			elseif RageBot.TargetMode == "Crosshair" and camera then
+				local screen, onScreen = camera:WorldToViewportPoint(pRoot.Position)
+				if onScreen and screen.Z > 0 then
+					score = (Vector2.new(screen.X, screen.Y) - viewport).Magnitude
+				else
+					score = 100000 + dist
+				end
 			end
+			table.insert(list, {
+				player = player,
+				model = pChar,
+				root = pRoot,
+				part = part,
+				score = score,
+			})
 		end
-		return closestPlayer, closestRoot, closestHead
+		table.sort(list, function(a, b)
+			return a.score < b.score
+		end)
+		return list
 	end
 
 	local knifeSafeRange = 16
-	local knifeHeights = { 12, 18, 24 }
 
 	local function getKnifeRoots()
 		local roots = {}
@@ -1593,28 +1638,78 @@ do
 		return roots
 	end
 
-	local function isOutOfKnifeRange(position, roots)
-		for _, root in roots do
-			if (root.Position - position).Magnitude < knifeSafeRange then
-				return false
+	local function getEnemyRoots(exclude)
+		local roots = {}
+		for _, player in plrs:GetPlayers() do
+			if player ~= exclude and isEnemy(player) then
+				local pChar = player.Character
+				local pRoot = pChar and pChar:FindFirstChild("HumanoidRootPart")
+				if pRoot then
+					table.insert(roots, pRoot)
+				end
 			end
 		end
-		return true
+		return roots
 	end
 
-	local function pickDesyncPosition(targetRoot)
-		local roots = getKnifeRoots()
-		if #roots == 0 then
-			return (targetRoot.CFrame * CFrame.new(0, 1, 2)).Position
-		end
-		local position
-		for _, height in knifeHeights do
-			position = targetRoot.Position + Vector3.new(0, height, 0)
-			if isOutOfKnifeRange(position, roots) then
-				return position
+	local function minDistance(position, roots)
+		local best = math.huge
+		for _, root in roots do
+			local d = (root.Position - position).Magnitude
+			if d < best then
+				best = d
 			end
 		end
-		return position
+		return best
+	end
+
+	local function pickDesyncPosition(target, knifeRoots, otherRoots)
+		local base = target.part.Position
+		if not RageBot.AntiHit then
+			return (target.root.CFrame * CFrame.new(0, 1, 2)).Position, true
+		end
+		local candidates = {}
+		local heights = { RageBot.Height, RageBot.Height + 6, RageBot.Height + 12, RageBot.Height - 4 }
+		for _, height in heights do
+			if height < 6 then
+				height = 6
+			end
+			table.insert(candidates, base + Vector3.new(0, height, 0))
+		end
+		local count = RageBot.Jitter and 8 or 4
+		for i = 1, count do
+			local angle = RageBot.Jitter and rng:NextNumber(0, math.pi * 2) or (i / count) * math.pi * 2
+			local radius = RageBot.Jitter and rng:NextNumber(1, math.max(RageBot.Radius, 1.5)) or RageBot.Radius
+			local height = RageBot.Height + (RageBot.Jitter and rng:NextNumber(-3, 8) or 0)
+			if height < 6 then
+				height = 6
+			end
+			table.insert(candidates, base + Vector3.new(math.cos(angle) * radius, height, math.sin(angle) * radius))
+		end
+		local scored = {}
+		for _, position in candidates do
+			local knifeDist = minDistance(position, knifeRoots)
+			if knifeDist >= knifeSafeRange then
+				local otherDist = minDistance(position, otherRoots)
+				table.insert(scored, { pos = position, safety = math.min(otherDist, 200) + math.min(knifeDist, 100) * 0.5 })
+			end
+		end
+		if #scored == 0 then
+			local fallback = base + Vector3.new(0, RageBot.Height + 20, 0)
+			return fallback, not RageBot.WallCheck or isVisibleTarget(target.part, target.model, fallback)
+		end
+		table.sort(scored, function(a, b)
+			return a.safety > b.safety
+		end)
+		if not RageBot.WallCheck then
+			return scored[1].pos, true
+		end
+		for i = 1, math.min(#scored, 5) do
+			if isVisibleTarget(target.part, target.model, scored[i].pos) then
+				return scored[i].pos, true
+			end
+		end
+		return nil, false
 	end
 
 	local burstShots = 0
@@ -1670,15 +1765,6 @@ do
 		end
 	end
 
-	local function isTargetImmune(player)
-		local ok, immune = pcall(function()
-			local fighter = FighterController:GetFighter(player)
-			local entity = fighter and fighter.Entity
-			return entity and entity:Get("IsInvincible")
-		end)
-		return ok and immune and true or false
-	end
-
 	local function isLocalFrozen()
 		local localFighter = FighterController.LocalFighter
 		local entity = localFighter and localFighter.Entity
@@ -1712,6 +1798,7 @@ do
 	end
 
 	local function getFireGap(item)
+		local pad = RageBot.FirePad / 1000
 		local ok, gap = pcall(function()
 			local info = item.Info
 			local base = info.ShootCooldown or info.AttackCooldown
@@ -1720,9 +1807,9 @@ do
 			end
 			local burst = info.BurstCount
 			if burst and burst > 1 and info.BurstCooldown and burstShots % burst ~= 0 then
-				return info.BurstCooldown + 0.005
+				return info.BurstCooldown + pad
 			end
-			return base + 0.005
+			return base + pad
 		end)
 		if ok and gap then
 			return gap
@@ -1730,51 +1817,70 @@ do
 		return RageBot.FireRate
 	end
 
+	local function restore()
+		if pending then
+			local data = pending
+			pending = nil
+			if data.root and data.root.Parent then
+				data.root.CFrame = data.cf
+				data.root.AssemblyLinearVelocity = data.vel
+				data.root.AssemblyAngularVelocity = data.rot
+			end
+		end
+	end
+
+	runS:BindToRenderStep("__ragerestore", 101, restore)
+	runS.PreSimulation:Connect(restore)
+
 	runS.Heartbeat:Connect(function()
 		if not RageBot.Enabled then
 			return
 		end
 
+		restore()
 		handleReload()
 		ensureEquipped()
 		updateDeflection()
-		local targetPlayer, targetRoot, targetHead = getClosestTarget()
-		local desyncCF = nil
 
 		if isLocalFrozen() then
 			return
 		end
 
-		if targetRoot and targetHead then
-			local desyncPos = pickDesyncPosition(targetRoot)
-			desyncCF = CFrame.lookAt(desyncPos, targetHead.Position)
-		end
+		local char = lplr.Character
+		local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return end
+		local localFighter = FighterController.LocalFighter
+		if not localFighter then return end
+		local item = localFighter.EquippedItem
+		if not item then return end
 
-		if desyncCF and lplr.Character then
-			local myRoot = lplr.Character:FindFirstChild("HumanoidRootPart")
-			if myRoot then
-				local oldCF = myRoot.CFrame
-				local oldVel = myRoot.Velocity
-				local oldRotVel = myRoot.RotVelocity
-				myRoot.CFrame = desyncCF
-				runS:BindToRenderStep("__restore", 101, function()
-					if myRoot then
-						myRoot.CFrame = oldCF
-						myRoot.Velocity = oldVel
-						myRoot.RotVelocity = oldRotVel
-					end
-					runS:UnbindFromRenderStep("__restore")
-				end)
+		local targets = collectTargets(myRoot)
+		if #targets == 0 then return end
+
+		local knifeRoots = getKnifeRoots()
+		local target, desyncPos = nil, nil
+		for i = 1, math.min(#targets, 4) do
+			local candidate = targets[i]
+			local position, ok = pickDesyncPosition(candidate, knifeRoots, getEnemyRoots(candidate.player))
+			if ok and position then
+				target = candidate
+				desyncPos = position
+				break
 			end
 		end
+		if not target or not desyncPos then return end
 
-		if not targetPlayer or not targetHead or not targetRoot then return end
-		if deflecting[targetPlayer] then return end
-		if isTargetImmune(targetPlayer) then return end
-		if not lplr.Character or not lplr.Character:FindFirstChild("HumanoidRootPart") then return end
-		if not FighterController or not FighterController.LocalFighter then return end
-		local item = FighterController.LocalFighter.EquippedItem
-		if not item then return end
+		local desyncCF = CFrame.lookAt(desyncPos, target.part.Position)
+		pending = {
+			root = myRoot,
+			cf = myRoot.CFrame,
+			vel = myRoot.AssemblyLinearVelocity,
+			rot = myRoot.AssemblyAngularVelocity,
+		}
+		myRoot.CFrame = desyncCF
+		myRoot.AssemblyLinearVelocity = Vector3.zero
+		myRoot.AssemblyAngularVelocity = Vector3.zero
+
 		if item ~= lastItem then
 			lastItem = item
 			burstShots = 0
@@ -1783,17 +1889,18 @@ do
 		if tick() - lastFire < getFireGap(item) then return end
 		lastFire = tick()
 		burstShots = burstShots + 1
-		local originPos = desyncCF and desyncCF.Position or targetRoot.Position
-		local targetPos = targetHead.Position
-		local aimCF = CFrame.lookAt(originPos, targetPos)
-		local targetCF = targetHead.CFrame
-		local objSpaceHeadOffset = targetCF:ToObjectSpace(CFrame.new(targetPos))
+
+		local targetPart = target.part
+		local targetPos = targetPart.Position
+		local aimCF = CFrame.lookAt(desyncPos, targetPos)
+		local targetCF = targetPart.CFrame
+		local objSpaceOffset = targetCF:ToObjectSpace(CFrame.new(targetPos))
 		local cameradata = {}
 		cameradata[utf8.char(1)] = {
 			[utf8.char(0)] = util:EncodeCFrame(aimCF),
 			[utf8.char(1)] = util:EncodeCFrame(targetCF),
-			[utf8.char(2)] = targetHead,
-			[utf8.char(3)] = util:EncodeCFrame(objSpaceHeadOffset)
+			[utf8.char(2)] = targetPart,
+			[utf8.char(3)] = util:EncodeCFrame(objSpaceOffset)
 		}
 		repS.Remotes.Replication.Fighter.UseItem:FireServer(
 			item:Get("ObjectID"),
@@ -1802,7 +1909,6 @@ do
 			nil
 		)
 	end)
-
 	local RageBotTab = Rage:AddSubTab("Ragebot", "skull")
 	local RageBotSection = RageBotTab:AddSection("Ragebot", "Left", "skull", "ragebotmain")
 	RageBotSection:AddToggle({
